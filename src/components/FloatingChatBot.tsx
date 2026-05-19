@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { MessageSquareText, Loader2, X } from 'lucide-react';
+import { products } from '../data/products';
 
 type Message = {
 	role: 'user' | 'assistant' | 'system-prompt'; // system-prompt es para la UI, no para la API
@@ -13,8 +14,15 @@ const STORAGE_KEY = 'chatbot_memory';
 // Cualquier usuario puede ver y usar esta clave. Se recomienda encarecidamente usar un backend proxy.
 const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY;
 
-const MODEL_NAME = 'llama3-8b-8192';
-console.log(GROQ_API_KEY);
+// Lista de modelos a usar, si uno falla, intentará con el siguiente
+const MODELS = [
+	'llama3-8b-8192',
+	'llama3-70b-8192',
+	'mixtral-8x7b-32768',
+	'gemma2-9b-it',
+	'llama-3.1-8b-instant',
+	'llama-3.1-70b-versatile'
+];
 
 export default function FloatingChatBot() {
 	const [isOpen, setIsOpen] = useState(false);
@@ -117,48 +125,85 @@ export default function FloatingChatBot() {
 		setInput('');
 		setLoading(true);
 
-		try {
-			const res = await fetch(
-				'https://api.groq.com/openai/v1/chat/completions',
-				{
-					method: 'POST',
-					headers: {
-						Authorization: `Bearer ${GROQ_API_KEY}`,
-						'Content-Type': 'application/json',
-					},
-					body: JSON.stringify({
-						model: MODEL_NAME,
-						messages: [
-							{
-								role: 'system',
-								content:
-									'Eres un asistente de soporte para una tienda de tecnología en Colombia. Tu objetivo es ayudar a los clientes con sus preguntas sobre productos, servicios, y cualquier otra consulta relacionada con la tienda. Sé amable y profesional.',
-							},
-							...newMessages, // Enviar los mensajes actualizados incluyendo el del usuario
-						],
-						temperature: 0.7,
-					}),
+		const systemPrompt = `Eres un excelente asesor de ventas de una tienda de tecnología en Colombia.
+Tu ÚNICA función es vender y asesorar sobre los productos que tenemos disponibles. 
+REGLAS DE FORMATO Y ESTILO (ESTRICTAS): 
+- Escribe como una persona real en un chat: usa excelente ortografía, coloca bien las comas (,) y los puntos (.).
+- NO uses comillas raras (como \\") ni encierres tus respuestas entre comillas.
+- Separa tus ideas utilizando "punto y aparte" (saltos de línea). Esto hace que tu mensaje no sea un bloque de texto pegado.
+- Sé MUY conciso, directo, natural y amigable.
+- NUNCA uses frases robóticas ni digas "soy una IA", "modelo de lenguaje" o "bot".
+
+REGLAS DE VENTAS (ESTRICTAS):
+- NO hables de temas que no sean sobre la tienda o nuestra tecnología.
+- NO inventes precios, productos, marcas ni características. Solo ofrece lo listado en el catálogo.
+- Si el usuario pregunta por un producto específico o una categoría en particular, NO le ofrezcas todo el catálogo. Háblale SOLO de los productos que encajen.
+- IMPORTANTE: Para mostrar visualmente los productos al usuario de forma hermosa, SIEMPRE usa el comando especial [SHOW_PRODUCTS:IDs], donde "IDs" son los números de ID de los productos separados por coma.
+- Ejemplos del comando:
+Para mostrar solo periféricos (ej. ids 2 y 3): [SHOW_PRODUCTS:2,3]
+Para mostrar un teclado (ej. id 3): [SHOW_PRODUCTS:3]
+Para mostrar todo (solo si lo piden): [SHOW_PRODUCTS:1,2,3,4,5,6,7,8]
+- Usa SIEMPRE el comando [SHOW_PRODUCTS:IDs] en tu respuesta cuando recomiendes productos para que se vean como tarjetas visuales. NO uses [SHOW_PRODUCTS] sin IDs.
+
+CATÁLOGO DE PRODUCTOS DISPONIBLES:
+${JSON.stringify(products, null, 2)}
+`;
+
+		let reply = '';
+		let success = false;
+
+		for (const model of MODELS) {
+			try {
+				const res = await fetch(
+					'https://api.groq.com/openai/v1/chat/completions',
+					{
+						method: 'POST',
+						headers: {
+							Authorization: `Bearer ${GROQ_API_KEY}`,
+							'Content-Type': 'application/json',
+						},
+						body: JSON.stringify({
+							model: model,
+							messages: [
+								{
+									role: 'system',
+									content: systemPrompt,
+								},
+								...newMessages, // Enviar los mensajes actualizados incluyendo el del usuario
+							],
+							temperature: 0.7,
+						}),
+					}
+				);
+
+				const data = await res.json();
+				if (!res.ok) {
+					console.warn(`Modelo ${model} falló:`, data?.error?.message);
+					continue; // Intenta con el siguiente modelo
 				}
-			);
 
-			const data = await res.json();
-			if (!res.ok)
-				throw new Error(data?.error?.message || 'Error al consultar IA');
+				reply = data?.choices?.[0]?.message?.content ?? 'Respuesta vacía';
+				success = true;
+				break; // Éxito, salir del bucle
+			} catch (error) {
+				console.warn(`Error de red al conectar con modelo ${model}:`, error);
+				continue; // Intenta con el siguiente modelo
+			}
+		}
 
-			const reply = data?.choices?.[0]?.message?.content ?? 'Respuesta vacía';
-			setMessages([...newMessages, { role: 'assistant', content: reply }]); // Añadir la respuesta de la IA
-		} catch (error) {
-			console.error(error);
+		if (success) {
+			setMessages([...newMessages, { role: 'assistant', content: reply }]);
+		} else {
 			setMessages((prev) => [
 				...prev,
 				{
 					role: 'assistant',
-					content: '⚠️ Error al contactar con el servidor.',
+					content: '⚠️ Error al contactar con el servidor. Todos los modelos fallaron.',
 				},
 			]);
-		} finally {
-			setLoading(false);
 		}
+
+		setLoading(false);
 	};
 
 	return (
@@ -180,7 +225,7 @@ export default function FloatingChatBot() {
 					<div className="bg-green-600 text-white p-4 rounded-t-xl flex items-center justify-between shadow-md">
 						<h2 className="text-lg font-semibold flex items-center gap-2">
 							<MessageSquareText className="w-5 h-5" />
-							{'Asistente Virtual'}
+							{'Soporte en línea'}
 						</h2>
 						<button
 							onClick={closeChat}
@@ -221,7 +266,7 @@ export default function FloatingChatBot() {
 											{'¡Hola! ¿En qué puedo ayudarte hoy?'}
 										</p>
 										<p className="text-sm">
-											{'Soy tu asistente virtual para la tienda de tecnología.'}
+											{'Soy tu asesor de ventas para la tienda de tecnología.'}
 										</p>
 									</div>
 								)}
@@ -230,21 +275,49 @@ export default function FloatingChatBot() {
 										{/* Solo renderizar mensajes de usuario y asistente */}
 										{msg.role !== 'system-prompt' && (
 											<div
-												className={`flex items-start gap-3 ${
-													msg.role === 'user' ? 'justify-end' : 'justify-start'
-												}`}>
+												className={`flex items-start gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'
+													}`}>
 												{msg.role === 'assistant' && (
-													<div className="w-8 h-8 rounded-full bg-gray-300 text-gray-800 flex items-center justify-center text-xs font-semibold flex-shrink-0">
+													<div className="w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center text-xs font-semibold flex-shrink-0">
 														{'AI'}
 													</div>
 												)}
 												<div
-													className={`px-4 py-2 rounded-xl max-w-[80%] text-sm whitespace-pre-wrap shadow-sm ${
-														msg.role === 'user'
+													className={`px-4 py-2 rounded-xl max-w-[80%] text-sm whitespace-pre-wrap shadow-sm ${msg.role === 'user'
 															? 'bg-green-100 text-green-800 rounded-br-none'
 															: 'bg-gray-200 text-gray-800 rounded-bl-none'
-													}`}>
-													{msg.content}
+														}`}>
+													{(() => {
+														const content = msg.content;
+														const match = content.match(/\[SHOW_PRODUCTS:?([\d,]*)\]/);
+														if (match) {
+															const idsStr = match[1];
+															let filteredProducts = products;
+															if (idsStr) {
+																const ids = idsStr.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+																if (ids.length > 0) {
+																	filteredProducts = products.filter(p => ids.includes(p.id));
+																}
+															}
+															const textContent = content.replace(match[0], '');
+															
+															return (
+																<div className="flex flex-col gap-3">
+																	{textContent.trim() && <span>{textContent.trim()}</span>}
+																	<div className="grid grid-cols-1 gap-3 mt-1">
+																		{filteredProducts.map((p) => (
+																			<div key={p.id} className="bg-white p-3 rounded-lg shadow border border-gray-200 flex flex-col gap-1 text-left">
+																				<span className="font-bold text-gray-800 text-sm">{p.name}</span>
+																				<span className="text-green-600 font-bold text-sm">{p.price}</span>
+																				<span className="text-gray-600 text-xs leading-relaxed">{p.description}</span>
+																			</div>
+																		))}
+																	</div>
+																</div>
+															);
+														}
+														return content;
+													})()}
 												</div>
 												{msg.role === 'user' && (
 													<div className="w-8 h-8 rounded-full bg-green-500 text-white flex items-center justify-center text-xs font-semibold flex-shrink-0">
